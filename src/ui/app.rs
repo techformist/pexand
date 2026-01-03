@@ -2,6 +2,7 @@
 
 use crate::db::{Snippet, SnippetManager};
 use crate::sentinel::SentinelMessage;
+use crossbeam_channel::Sender;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use iced::{
@@ -14,7 +15,6 @@ use iced::{
     window, Element, Length, Subscription, Task, Theme,
 };
 use rusqlite::Connection;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use super::constants::*;
@@ -62,6 +62,8 @@ pub enum Message {
     External(UiExternalMessage),
     CheckExternalMessages,
     WindowOpened(window::Id),
+    // Debouncing
+    ApplyPendingSearch,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,7 +87,7 @@ enum FocusedField {
 pub struct PexandApp {
     search_query: String,
     snippets: Vec<Snippet>,
-    filtered_snippets: Vec<(usize, Snippet)>,
+    filtered_snippets: Vec<(usize, Arc<Snippet>)>,
     selected_index: usize,
     view_mode: ViewMode,
     editor_state: Option<EditorState>,
@@ -99,6 +101,9 @@ pub struct PexandApp {
     // Settings state
     block_apps: Vec<String>,
     block_app_input: String,
+    // Search debouncing
+    pending_search_query: Option<String>,
+    last_search_time: std::time::Instant,
 }
 
 impl PexandApp {
@@ -111,7 +116,7 @@ impl PexandApp {
         let filtered_snippets = snippets
             .iter()
             .enumerate()
-            .map(|(i, s)| (i, s.clone()))
+            .map(|(i, s)| (i, Arc::new(s.clone())))
             .collect();
 
         Self {
@@ -130,6 +135,8 @@ impl PexandApp {
             window_id: None,
             block_apps: Self::load_block_apps(),
             block_app_input: String::new(),
+            pending_search_query: None,
+            last_search_time: std::time::Instant::now(),
         }
     }
 
@@ -144,33 +151,60 @@ impl PexandApp {
                 .snippets
                 .iter()
                 .enumerate()
-                .map(|(i, s)| (i, s.clone()))
+                .map(|(i, s)| (i, Arc::new(s.clone())))
                 .collect();
         } else {
-            let mut scored: Vec<(usize, Snippet, i64)> = self
-                .snippets
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| {
-                    let trigger_score = self
-                        .matcher
-                        .fuzzy_match(&s.trigger, &self.search_query)
-                        .unwrap_or(0);
-                    let body_score = self
-                        .matcher
-                        .fuzzy_match(&s.body, &self.search_query)
-                        .unwrap_or(0);
-                    let score = trigger_score.max(body_score);
-                    if score > 0 {
-                        Some((i, s.clone(), score))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            // Optimization: for very short queries (1-2 chars), use simple substring match
+            // This is much faster than fuzzy matching for initial typing
+            let query_len = self.search_query.chars().count();
 
-            scored.sort_by(|a, b| b.2.cmp(&a.2));
-            self.filtered_snippets = scored.into_iter().map(|(i, s, _)| (i, s)).collect();
+            if query_len <= 2 {
+                // Fast path: simple case-insensitive substring matching
+                let query_lower = self.search_query.to_lowercase();
+                self.filtered_snippets = self
+                    .snippets
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| {
+                        s.trigger.to_lowercase().contains(&query_lower)
+                            || s.body.to_lowercase().contains(&query_lower)
+                    })
+                    .map(|(i, s)| (i, Arc::new(s.clone())))
+                    .collect();
+            } else {
+                // Full fuzzy matching for longer queries
+                let mut scored: Vec<(usize, Arc<Snippet>, i64)> = self
+                    .snippets
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| {
+                        // Optimization: check trigger first as it's usually shorter
+                        let trigger_score = self
+                            .matcher
+                            .fuzzy_match(&s.trigger, &self.search_query)
+                            .unwrap_or(0);
+
+                        // Only check body if trigger didn't match well
+                        let body_score = if trigger_score < 50 {
+                            self.matcher
+                                .fuzzy_match(&s.body, &self.search_query)
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+
+                        let score = trigger_score.max(body_score);
+                        if score > 0 {
+                            Some((i, Arc::new(s.clone()), score))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                scored.sort_by(|a, b| b.2.cmp(&a.2));
+                self.filtered_snippets = scored.into_iter().map(|(i, s, _)| (i, s)).collect();
+            }
         }
 
         if self.selected_index >= self.filtered_snippets.len() && !self.filtered_snippets.is_empty()
@@ -323,8 +357,21 @@ impl PexandApp {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SearchChanged(query) => {
-                self.search_query = query;
-                self.filter_snippets();
+                // Store the query and mark it as pending
+                self.pending_search_query = Some(query);
+                self.last_search_time = std::time::Instant::now();
+                // Filtering will happen in ApplyPendingSearch after debounce delay
+            }
+            Message::ApplyPendingSearch => {
+                // Check if enough time has passed since last input
+                let elapsed = self.last_search_time.elapsed();
+                if elapsed >= std::time::Duration::from_millis(150) {
+                    if let Some(query) = self.pending_search_query.take() {
+                        self.search_query = query;
+                        self.filter_snippets();
+                    }
+                }
+                // If not enough time passed, the next timer tick will handle it
             }
             Message::SnippetSelected(index) => {
                 self.selected_index = index;
@@ -594,10 +641,14 @@ impl PexandApp {
         let external_check = iced::time::every(std::time::Duration::from_millis(100))
             .map(|_| Message::CheckExternalMessages);
 
+        // Check for pending search queries to apply (debouncing)
+        let search_debounce = iced::time::every(std::time::Duration::from_millis(50))
+            .map(|_| Message::ApplyPendingSearch);
+
         // Listen for window open events to capture window ID
         let window_events = window::open_events().map(Message::WindowOpened);
 
-        Subscription::batch([keyboard, external_check, window_events])
+        Subscription::batch([keyboard, external_check, search_debounce, window_events])
     }
 }
 
@@ -728,7 +779,7 @@ impl PexandApp {
                 let trigger_display = if let Some(label) = &snippet.label {
                     format!("{} - {}", snippet.trigger, label)
                 } else {
-                    snippet.trigger.clone()
+                    snippet.trigger.to_string()
                 };
 
                 let trigger_text = text(trigger_display)

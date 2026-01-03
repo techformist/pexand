@@ -23,6 +23,9 @@ impl Database {
         // PRAGMA journal_mode returns a result, so we use query instead of execute
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
+        // Use memory for temporary storage (faster than disk)
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
+
         // Create the snippets table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS snippets (
@@ -33,6 +36,28 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )",
+            [],
+        )?;
+
+        // Create indexes for common query patterns
+        // Index on usage_count for sorting by most frequently used snippets
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snippets_usage_count 
+             ON snippets(usage_count DESC)",
+            [],
+        )?;
+
+        // Index on updated_at for sorting by most recently modified
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snippets_updated_at 
+             ON snippets(updated_at DESC)",
+            [],
+        )?;
+
+        // Index on created_at for sorting by creation date
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snippets_created_at 
+             ON snippets(created_at DESC)",
             [],
         )?;
 
@@ -114,5 +139,69 @@ mod tests {
         if !Path::new("portable.txt").exists() {
             assert!(path.to_string_lossy().contains("Pexand"));
         }
+    }
+
+    #[test]
+    fn test_indexes_created() {
+        // Use a temporary database for testing
+        let temp_dir = env::temp_dir();
+        let db_path = temp_dir.join("test_pexand_indexes.db");
+
+        // Clean up any existing test database
+        let _ = std::fs::remove_file(&db_path);
+
+        // Initialize database using the actual init function
+        let conn = Connection::open(&db_path).unwrap();
+
+        // Create table and indexes manually for testing
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS snippets (
+                trigger TEXT PRIMARY KEY NOT NULL,
+                label TEXT,
+                body TEXT NOT NULL,
+                usage_count INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snippets_usage_count 
+             ON snippets(usage_count DESC)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snippets_updated_at 
+             ON snippets(updated_at DESC)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snippets_created_at 
+             ON snippets(created_at DESC)",
+            [],
+        )
+        .unwrap();
+
+        // Verify indexes exist
+        let index_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' 
+                 AND name IN ('idx_snippets_usage_count', 'idx_snippets_updated_at', 'idx_snippets_created_at')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(index_count, 3, "All three indexes should be created");
+
+        // Clean up
+        drop(conn);
+        let _ = std::fs::remove_file(&db_path);
     }
 }

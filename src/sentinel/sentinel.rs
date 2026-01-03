@@ -1,11 +1,16 @@
 use super::{Buffer, Injector, Trie, VariableParser};
 use crate::db::SnippetManager;
+use crossbeam_channel::{bounded, Receiver, Sender};
 use rdev::{listen, Event, EventType, Key};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+/// Tracks keyboard modifier state (Shift, etc.)
+struct ModifierState {
+    shift_pressed: bool,
+}
 
 /// Messages that can be sent to the Sentinel
 pub enum SentinelMessage {
@@ -21,6 +26,7 @@ pub struct Sentinel {
     trie: Arc<Mutex<Trie>>,
     injector: Arc<Mutex<Injector>>,
     db_conn: Arc<Mutex<Connection>>,
+    modifier_state: Arc<Mutex<ModifierState>>,
 }
 
 impl Sentinel {
@@ -45,6 +51,9 @@ impl Sentinel {
             trie,
             injector,
             db_conn,
+            modifier_state: Arc::new(Mutex::new(ModifierState {
+                shift_pressed: false,
+            })),
         })
     }
 
@@ -63,7 +72,7 @@ impl Sentinel {
 
     /// Start the Sentinel in a background thread
     pub fn start(self) -> (thread::JoinHandle<()>, Sender<SentinelMessage>) {
-        let (tx, rx) = channel();
+        let (tx, rx) = bounded(10); // Small bounded channel for control messages
 
         let handle = thread::spawn(move || {
             self.run(rx);
@@ -84,17 +93,35 @@ impl Sentinel {
         let trie_clone = Arc::clone(&trie);
         let injector_clone = Arc::clone(&injector);
         let db_conn_clone = Arc::clone(&db_conn);
+        let modifier_state_clone = Arc::clone(&self.modifier_state);
 
         thread::spawn(move || {
             let callback = move |event: Event| {
-                if let EventType::KeyPress(key) = event.event_type {
-                    handle_key_press(
-                        key,
-                        &buffer_clone,
-                        &trie_clone,
-                        &injector_clone,
-                        &db_conn_clone,
-                    );
+                match event.event_type {
+                    EventType::KeyPress(key) => {
+                        // Track modifier keys
+                        if matches!(key, Key::ShiftLeft | Key::ShiftRight) {
+                            let mut state = modifier_state_clone.lock().unwrap();
+                            state.shift_pressed = true;
+                        } else {
+                            handle_key_press(
+                                key,
+                                &buffer_clone,
+                                &trie_clone,
+                                &injector_clone,
+                                &db_conn_clone,
+                                &modifier_state_clone,
+                            );
+                        }
+                    }
+                    EventType::KeyRelease(key) => {
+                        // Release modifier keys
+                        if matches!(key, Key::ShiftLeft | Key::ShiftRight) {
+                            let mut state = modifier_state_clone.lock().unwrap();
+                            state.shift_pressed = false;
+                        }
+                    }
+                    _ => {}
                 }
             };
 
@@ -130,6 +157,7 @@ fn handle_key_press(
     trie: &Arc<Mutex<Trie>>,
     injector: &Arc<Mutex<Injector>>,
     db_conn: &Arc<Mutex<Connection>>,
+    modifier_state: &Arc<Mutex<ModifierState>>,
 ) {
     // Check if this is a delimiter key (space, enter, tab, punctuation)
     let is_delimiter = matches!(
@@ -145,14 +173,15 @@ fn handle_key_press(
     );
 
     // Convert key to character
-    let ch = match key_to_char(key) {
+    let state = modifier_state.lock().unwrap();
+    let ch = match key_to_char(key, state.shift_pressed) {
         Some(c) => c,
         None => {
             // For non-character keys, check if it's a delimiter that should trigger expansion
             if is_delimiter {
                 // Check buffer for trigger match before the delimiter
-                let buffer_guard = buffer.lock().unwrap();
-                let buffer_text = buffer_guard.as_string();
+                let mut buffer_guard = buffer.lock().unwrap();
+                let buffer_text = buffer_guard.as_string().to_string();
                 drop(buffer_guard);
 
                 let trie_guard = trie.lock().unwrap();
@@ -168,7 +197,7 @@ fn handle_key_press(
     // Add character to buffer
     let mut buffer_guard = buffer.lock().unwrap();
     buffer_guard.push(ch);
-    let buffer_text = buffer_guard.as_string();
+    let buffer_text = buffer_guard.as_string().to_string();
     drop(buffer_guard);
 
     // If this character is a delimiter, check for trigger match
@@ -233,57 +262,75 @@ fn perform_expansion(
     }
 }
 
-/// Convert rdev Key to character
-fn key_to_char(key: Key) -> Option<char> {
+/// Convert rdev Key to character with modifier support
+/// Handles Shift key for uppercase letters and special characters
+fn key_to_char(key: Key, shift_pressed: bool) -> Option<char> {
     match key {
-        Key::KeyA => Some('a'),
-        Key::KeyB => Some('b'),
-        Key::KeyC => Some('c'),
-        Key::KeyD => Some('d'),
-        Key::KeyE => Some('e'),
-        Key::KeyF => Some('f'),
-        Key::KeyG => Some('g'),
-        Key::KeyH => Some('h'),
-        Key::KeyI => Some('i'),
-        Key::KeyJ => Some('j'),
-        Key::KeyK => Some('k'),
-        Key::KeyL => Some('l'),
-        Key::KeyM => Some('m'),
-        Key::KeyN => Some('n'),
-        Key::KeyO => Some('o'),
-        Key::KeyP => Some('p'),
-        Key::KeyQ => Some('q'),
-        Key::KeyR => Some('r'),
-        Key::KeyS => Some('s'),
-        Key::KeyT => Some('t'),
-        Key::KeyU => Some('u'),
-        Key::KeyV => Some('v'),
-        Key::KeyW => Some('w'),
-        Key::KeyX => Some('x'),
-        Key::KeyY => Some('y'),
-        Key::KeyZ => Some('z'),
-        Key::Num0 => Some('0'),
-        Key::Num1 => Some('1'),
-        Key::Num2 => Some('2'),
-        Key::Num3 => Some('3'),
-        Key::Num4 => Some('4'),
-        Key::Num5 => Some('5'),
-        Key::Num6 => Some('6'),
-        Key::Num7 => Some('7'),
-        Key::Num8 => Some('8'),
-        Key::Num9 => Some('9'),
+        // Letters - handle case based on Shift
+        Key::KeyA => Some(if shift_pressed { 'A' } else { 'a' }),
+        Key::KeyB => Some(if shift_pressed { 'B' } else { 'b' }),
+        Key::KeyC => Some(if shift_pressed { 'C' } else { 'c' }),
+        Key::KeyD => Some(if shift_pressed { 'D' } else { 'd' }),
+        Key::KeyE => Some(if shift_pressed { 'E' } else { 'e' }),
+        Key::KeyF => Some(if shift_pressed { 'F' } else { 'f' }),
+        Key::KeyG => Some(if shift_pressed { 'G' } else { 'g' }),
+        Key::KeyH => Some(if shift_pressed { 'H' } else { 'h' }),
+        Key::KeyI => Some(if shift_pressed { 'I' } else { 'i' }),
+        Key::KeyJ => Some(if shift_pressed { 'J' } else { 'j' }),
+        Key::KeyK => Some(if shift_pressed { 'K' } else { 'k' }),
+        Key::KeyL => Some(if shift_pressed { 'L' } else { 'l' }),
+        Key::KeyM => Some(if shift_pressed { 'M' } else { 'm' }),
+        Key::KeyN => Some(if shift_pressed { 'N' } else { 'n' }),
+        Key::KeyO => Some(if shift_pressed { 'O' } else { 'o' }),
+        Key::KeyP => Some(if shift_pressed { 'P' } else { 'p' }),
+        Key::KeyQ => Some(if shift_pressed { 'Q' } else { 'q' }),
+        Key::KeyR => Some(if shift_pressed { 'R' } else { 'r' }),
+        Key::KeyS => Some(if shift_pressed { 'S' } else { 's' }),
+        Key::KeyT => Some(if shift_pressed { 'T' } else { 't' }),
+        Key::KeyU => Some(if shift_pressed { 'U' } else { 'u' }),
+        Key::KeyV => Some(if shift_pressed { 'V' } else { 'v' }),
+        Key::KeyW => Some(if shift_pressed { 'W' } else { 'w' }),
+        Key::KeyX => Some(if shift_pressed { 'X' } else { 'x' }),
+        Key::KeyY => Some(if shift_pressed { 'Y' } else { 'y' }),
+        Key::KeyZ => Some(if shift_pressed { 'Z' } else { 'z' }),
+
+        // Numbers - handle Shift for special characters (US layout)
+        Key::Num0 => Some(if shift_pressed { ')' } else { '0' }),
+        Key::Num1 => Some(if shift_pressed { '!' } else { '1' }),
+        Key::Num2 => Some(if shift_pressed { '@' } else { '2' }),
+        Key::Num3 => Some(if shift_pressed { '#' } else { '3' }),
+        Key::Num4 => Some(if shift_pressed { '$' } else { '4' }),
+        Key::Num5 => Some(if shift_pressed { '%' } else { '5' }),
+        Key::Num6 => Some(if shift_pressed { '^' } else { '6' }),
+        Key::Num7 => Some(if shift_pressed { '&' } else { '7' }),
+        Key::Num8 => Some(if shift_pressed { '*' } else { '8' }),
+        Key::Num9 => Some(if shift_pressed { '(' } else { '9' }),
+
+        // Special characters
         Key::Space => Some(' '),
-        Key::SemiColon => Some(';'),
-        Key::Equal => Some('='),
-        Key::Comma => Some(','),
-        Key::Minus => Some('-'),
-        Key::Dot => Some('.'),
-        Key::Slash => Some('/'),
-        Key::BackQuote => Some('`'),
-        Key::LeftBracket => Some('['),
-        Key::BackSlash => Some('\\'),
-        Key::RightBracket => Some(']'),
-        Key::Quote => Some('\''),
+        Key::SemiColon => Some(if shift_pressed { ':' } else { ';' }),
+        Key::Equal => Some(if shift_pressed { '+' } else { '=' }),
+        Key::Comma => Some(if shift_pressed { '<' } else { ',' }),
+        Key::Minus => Some(if shift_pressed { '_' } else { '-' }),
+        Key::Dot => Some(if shift_pressed { '>' } else { '.' }),
+        Key::Slash => Some(if shift_pressed { '?' } else { '/' }),
+        Key::BackQuote => Some(if shift_pressed { '~' } else { '`' }),
+        Key::LeftBracket => Some(if shift_pressed { '{' } else { '[' }),
+        Key::BackSlash => Some(if shift_pressed { '|' } else { '\\' }),
+        Key::RightBracket => Some(if shift_pressed { '}' } else { ']' }),
+        Key::Quote => Some(if shift_pressed { '"' } else { '\'' }),
+
+        // Ignore modifier keys themselves
+        Key::ShiftLeft
+        | Key::ShiftRight
+        | Key::ControlLeft
+        | Key::ControlRight
+        | Key::Alt
+        | Key::AltGr
+        | Key::MetaLeft
+        | Key::MetaRight => None,
+
+        // All other keys (function keys, arrows, etc.)
         _ => None,
     }
 }
@@ -396,9 +443,33 @@ mod tests {
 
     #[test]
     fn test_key_to_char() {
-        assert_eq!(key_to_char(Key::KeyA), Some('a'));
-        assert_eq!(key_to_char(Key::Space), Some(' '));
-        assert_eq!(key_to_char(Key::SemiColon), Some(';'));
-        assert_eq!(key_to_char(Key::Escape), None);
+        // Test lowercase letters (no shift)
+        assert_eq!(key_to_char(Key::KeyA, false), Some('a'));
+        assert_eq!(key_to_char(Key::KeyZ, false), Some('z'));
+
+        // Test uppercase letters (with shift)
+        assert_eq!(key_to_char(Key::KeyA, true), Some('A'));
+        assert_eq!(key_to_char(Key::KeyZ, true), Some('Z'));
+
+        // Test numbers without shift
+        assert_eq!(key_to_char(Key::Num1, false), Some('1'));
+        assert_eq!(key_to_char(Key::Num0, false), Some('0'));
+
+        // Test special characters with shift
+        assert_eq!(key_to_char(Key::Num1, true), Some('!'));
+        assert_eq!(key_to_char(Key::Num2, true), Some('@'));
+        assert_eq!(key_to_char(Key::Num0, true), Some(')'));
+
+        // Test punctuation
+        assert_eq!(key_to_char(Key::Space, false), Some(' '));
+        assert_eq!(key_to_char(Key::SemiColon, false), Some(';'));
+        assert_eq!(key_to_char(Key::SemiColon, true), Some(':'));
+        assert_eq!(key_to_char(Key::Comma, false), Some(','));
+        assert_eq!(key_to_char(Key::Comma, true), Some('<'));
+
+        // Test non-character keys
+        assert_eq!(key_to_char(Key::Escape, false), None);
+        assert_eq!(key_to_char(Key::ShiftLeft, false), None);
+        assert_eq!(key_to_char(Key::ControlLeft, false), None);
     }
 }

@@ -28,8 +28,22 @@ windows = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsA
 winres = "0.1"
 
 [profile.release]
-opt-level = "z"     # Optimize for size
-lto = true          # Enable Link Time Optimization
-codegen-units = 16   # Better optimization
-strip = true        # Strip debug symbols
-panic = "abort"     # Smaller binary
+opt-level = "z"          # Optimize for size (z is smaller than 3)
+lto = true               # Enable Link Time Optimization for better inlining
+codegen-units = 16       # Faster compilation, LTO still optimizes across units
+strip = "symbols"        # Strip symbols for smaller binary
+panic = "abort"          # Smaller binary, no unwinding
+overflow-checks = false  # Disable overflow checks in release
+debug-assertions = false # Disable debug assertions
+
+# Faster development builds
+[profile.dev]
+opt-level = 1            # Some optimization for faster iteration
+
+# Maximum optimization profile (use: cargo build --profile max-opt)
+# Only use this for final release builds where every byte/cycle counts
+[profile.max-opt]
+inherits = "release"
+codegen-units = 1        # Maximum optimization, very slow compile
+lto = true
+opt-level = "z"
