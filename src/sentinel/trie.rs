@@ -19,6 +19,7 @@ impl TrieNode {
 /// Radix Trie for efficient pattern matching of triggers
 pub struct Trie {
     root: TrieNode,
+    max_trigger_length: usize,
 }
 
 impl Trie {
@@ -26,18 +27,21 @@ impl Trie {
     pub fn new() -> Self {
         Self {
             root: TrieNode::new(),
+            max_trigger_length: 0,
         }
     }
 
     /// Insert a trigger into the Trie
     pub fn insert(&mut self, trigger: &str) {
         let mut current = &mut self.root;
+        let trigger_len = trigger.chars().count();
 
         for ch in trigger.chars() {
             current = current.children.entry(ch).or_insert_with(TrieNode::new);
         }
 
         current.is_end_of_word = true;
+        self.max_trigger_length = self.max_trigger_length.max(trigger_len);
     }
 
     /// Search for an exact match of a trigger
@@ -70,37 +74,70 @@ impl Trie {
 
     /// Find all triggers that match suffixes of the given text
     /// Returns the longest matching trigger found
+    /// Optimized to limit matching attempts to max_trigger_length per position
     pub fn find_matching_trigger(&self, text: &str) -> Option<String> {
-        let chars: Vec<char> = text.chars().collect();
-        
-        // Try each possible starting position, starting from the end
-        for start_idx in 0..chars.len() {
-            let mut current = &self.root;
-            let mut matched = String::new();
-            let mut last_match = None;
+        if self.max_trigger_length == 0 {
+            return None;
+        }
 
-            for i in start_idx..chars.len() {
+        let chars: Vec<char> = text.chars().collect();
+        let text_len = chars.len();
+
+        if text_len == 0 {
+            return None;
+        }
+
+        let mut longest_match: Option<(usize, String)> = None;
+
+        // Optimization: prioritize searching from the end where triggers are most likely
+        // We still search the full text but limit how deep we go from each position
+        // This reduces worst-case from O(n²) to O(n * m) where m = max_trigger_length
+
+        for start_idx in 0..text_len {
+            let mut current = &self.root;
+            let mut match_len = 0;
+            let mut last_match_len = 0;
+
+            // Limit search from this position to max_trigger_length
+            // This is the key optimization: we don't need to check beyond max trigger length
+            let end_pos = (start_idx + self.max_trigger_length + 1).min(text_len);
+
+            for i in start_idx..end_pos {
                 let ch = chars[i];
-                
+
                 match current.children.get(&ch) {
                     Some(node) => {
                         current = node;
-                        matched.push(ch);
-                        
+                        match_len += 1;
+
                         if current.is_end_of_word {
-                            last_match = Some(matched.clone());
+                            last_match_len = match_len;
                         }
                     }
                     None => break,
                 }
             }
 
-            if last_match.is_some() {
-                return last_match;
+            // If we found a match, store it if it's the longest so far
+            if last_match_len > 0 {
+                // Build the matched string using slice to avoid repeated allocations
+                let matched_str: String = chars[start_idx..start_idx + last_match_len]
+                    .iter()
+                    .collect();
+
+                // Keep track of longest match
+                match &longest_match {
+                    None => longest_match = Some((last_match_len, matched_str)),
+                    Some((prev_len, _)) => {
+                        if last_match_len > *prev_len {
+                            longest_match = Some((last_match_len, matched_str));
+                        }
+                    }
+                }
             }
         }
 
-        None
+        longest_match.map(|(_, s)| s)
     }
 
     /// Load multiple triggers into the Trie
@@ -113,6 +150,7 @@ impl Trie {
     /// Clear all triggers from the Trie
     pub fn clear(&mut self) {
         self.root = TrieNode::new();
+        self.max_trigger_length = 0;
     }
 }
 
@@ -162,14 +200,20 @@ mod tests {
         trie.insert(";email");
 
         // Match at the end
-        assert_eq!(trie.find_matching_trigger("hello ;name"), Some(";name".to_string()));
-        
+        assert_eq!(
+            trie.find_matching_trigger("hello ;name"),
+            Some(";name".to_string())
+        );
+
         // Match in the middle (should find it)
-        assert_eq!(trie.find_matching_trigger(";email and more"), Some(";email".to_string()));
-        
+        assert_eq!(
+            trie.find_matching_trigger(";email and more"),
+            Some(";email".to_string())
+        );
+
         // No match
         assert_eq!(trie.find_matching_trigger("hello world"), None);
-        
+
         // Partial match doesn't count
         assert_eq!(trie.find_matching_trigger("hello ;nam"), None);
     }
@@ -220,5 +264,47 @@ mod tests {
         let trie = Trie::new();
         assert!(!trie.search(";anything"));
         assert_eq!(trie.find_matching_trigger("test ;name"), None);
+    }
+
+    #[test]
+    fn test_performance_with_long_buffer() {
+        let mut trie = Trie::new();
+        trie.insert(";test");
+
+        // Create a long buffer (100 chars) with trigger near the end
+        let long_text = "a".repeat(90) + " ;test";
+
+        // Should still find the trigger efficiently
+        // With optimization: ~100 * 5 = 500 operations (O(n * m))
+        // Without optimization: ~100 * 100 = 10,000 operations (O(n²))
+        assert_eq!(
+            trie.find_matching_trigger(&long_text),
+            Some(";test".to_string())
+        );
+
+        // Test with trigger at the beginning
+        let long_text_start = ";test ".to_string() + &"b".repeat(90);
+        assert_eq!(
+            trie.find_matching_trigger(&long_text_start),
+            Some(";test".to_string())
+        );
+    }
+
+    #[test]
+    fn test_max_trigger_length_tracking() {
+        let mut trie = Trie::new();
+        assert_eq!(trie.max_trigger_length, 0);
+
+        trie.insert(";a");
+        assert_eq!(trie.max_trigger_length, 2);
+
+        trie.insert(";longer");
+        assert_eq!(trie.max_trigger_length, 7);
+
+        trie.insert(";x");
+        assert_eq!(trie.max_trigger_length, 7); // Should stay at 7
+
+        trie.clear();
+        assert_eq!(trie.max_trigger_length, 0);
     }
 }
