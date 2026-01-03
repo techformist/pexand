@@ -24,6 +24,8 @@ pub const ICON_SETTINGS: &str = "\u{E713}"; // Settings
 pub const ICON_EXPAND: &str = "\u{E740}"; // FullScreen/Expand
 pub const ICON_IMPORT: &str = "\u{E8B5}"; // CloudDownload/Import
 pub const ICON_EXPORT: &str = "\u{E898}"; // Upload/Export
+pub const ICON_REPLACE: &str = "\u{E8AC}"; // Sync/Replace
+pub const ICON_SKIP: &str = "\u{E73E}"; // CheckMark/Skip
 
 // Modern startup palette - deep purples with electric accents
 pub const COLOR_BG: iced::Color = iced::Color::from_rgb(0.07, 0.07, 0.11);
@@ -39,3 +41,5 @@ pub const COLOR_ACCENT_BRIGHT: iced::Color = iced::Color::from_rgb(0.50, 0.55, 1
 pub const COLOR_BUTTON_BG: iced::Color = iced::Color::from_rgba(0.40, 0.45, 0.95, 0.12);
 pub const COLOR_BUTTON_HOVER: iced::Color = iced::Color::from_rgba(0.40, 0.45, 0.95, 0.20);
 pub const COLOR_BUTTON_ACTIVE: iced::Color = iced::Color::from_rgba(0.40, 0.45, 0.95, 0.30);
+pub const COLOR_SUCCESS: iced::Color = iced::Color::from_rgb(0.40, 0.90, 0.60);
+pub const COLOR_WARNING: iced::Color = iced::Color::from_rgb(1.0, 0.70, 0.30);

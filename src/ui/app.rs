@@ -59,6 +59,8 @@ pub enum Message {
     BlockAppInputChanged(String),
     ExportSnippets,
     ImportSnippets,
+    ImportConflictDecision(ImportDecision),
+    CloseImportDialog,
     External(UiExternalMessage),
     CheckExternalMessages,
     WindowOpened(window::Id),
@@ -72,6 +74,22 @@ enum ViewMode {
     Editor,
     Help,
     Settings,
+    ImportDialog,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportDecision {
+    OverwriteAll,
+    SkipAll,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+struct ImportState {
+    snippets: Vec<Snippet>,
+    conflicts: Vec<String>, // triggers that already exist
+    new_count: usize,
+    conflict_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +119,8 @@ pub struct PexandApp {
     // Settings state
     block_apps: Vec<String>,
     block_app_input: String,
+    // Import state
+    import_state: Option<ImportState>,
     // Search debouncing
     pending_search_query: Option<String>,
     last_search_time: std::time::Instant,
@@ -135,6 +155,7 @@ impl PexandApp {
             window_id: None,
             block_apps: Self::load_block_apps(),
             block_app_input: String::new(),
+            import_state: None,
             pending_search_query: None,
             last_search_time: std::time::Instant::now(),
         }
@@ -337,6 +358,7 @@ impl PexandApp {
                 // Only one field in settings now, so tab does nothing
                 Task::none()
             }
+            ViewMode::ImportDialog => Task::none(),
         }
     }
 }
@@ -357,7 +379,8 @@ impl PexandApp {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SearchChanged(query) => {
-                // Store the query and mark it as pending
+                // Update the displayed query immediately for instant feedback
+                self.search_query = query.clone();
                 self.pending_search_query = Some(query);
                 self.last_search_time = std::time::Instant::now();
                 // Filtering will happen in ApplyPendingSearch after debounce delay
@@ -365,9 +388,9 @@ impl PexandApp {
             Message::ApplyPendingSearch => {
                 // Check if enough time has passed since last input
                 let elapsed = self.last_search_time.elapsed();
-                if elapsed >= std::time::Duration::from_millis(150) {
-                    if let Some(query) = self.pending_search_query.take() {
-                        self.search_query = query;
+                if elapsed >= std::time::Duration::from_millis(50) {
+                    if let Some(_query) = self.pending_search_query.take() {
+                        // search_query is already updated, just filter
                         self.filter_snippets();
                     }
                 }
@@ -464,6 +487,10 @@ impl PexandApp {
                             }
                             ViewMode::Settings => {
                                 self.view_mode = ViewMode::List;
+                            }
+                            ViewMode::ImportDialog => {
+                                self.import_state = None;
+                                self.view_mode = ViewMode::Settings;
                             }
                             ViewMode::List => {
                                 self.window_minimized = true;
@@ -606,6 +633,13 @@ impl PexandApp {
             Message::ImportSnippets => {
                 self.import_snippets();
             }
+            Message::ImportConflictDecision(decision) => {
+                self.process_import_decision(decision);
+            }
+            Message::CloseImportDialog => {
+                self.import_state = None;
+                self.view_mode = ViewMode::Settings;
+            }
         }
 
         Task::none()
@@ -617,6 +651,7 @@ impl PexandApp {
             ViewMode::Editor => self.view_editor(),
             ViewMode::Help => self.view_help(),
             ViewMode::Settings => self.view_settings(),
+            ViewMode::ImportDialog => self.view_import_dialog(),
         }
     }
 
@@ -1410,6 +1445,193 @@ impl PexandApp {
             .into()
     }
 
+    fn view_import_dialog(&self) -> Element<'_, Message> {
+        let import_state = match &self.import_state {
+            Some(state) => state,
+            None => {
+                // Fallback if state is missing
+                return self.view_settings();
+            }
+        };
+
+        // Header
+        let header = row![
+            text(ICON_IMPORT)
+                .font(ICON_FONT)
+                .size(16.0)
+                .color(COLOR_ACCENT),
+            text("Import Conflicts Detected")
+                .font(UI_FONT)
+                .size(13)
+                .color(COLOR_TEXT)
+        ]
+        .spacing(8)
+        .padding(iced::Padding::new(8.0).left(12.0).right(12.0).bottom(6.0))
+        .align_y(iced::Alignment::Center);
+
+        // Summary
+        let summary = column![
+            text(format!(
+                "Found {} snippet(s) to import:",
+                import_state.snippets.len()
+            ))
+            .font(UI_FONT)
+            .size(12)
+            .color(COLOR_TEXT),
+            text(format!("  • {} new snippet(s)", import_state.new_count))
+                .font(UI_FONT)
+                .size(12)
+                .color(COLOR_SUCCESS),
+            text(format!(
+                "  • {} conflicting snippet(s) (already exist)",
+                import_state.conflict_count
+            ))
+            .font(UI_FONT)
+            .size(12)
+            .color(COLOR_WARNING),
+        ]
+        .spacing(6);
+
+        // Conflict list (show first few)
+        let mut conflict_list = Column::new().spacing(2);
+        let conflicts_to_show = import_state.conflicts.iter().take(5);
+
+        for trigger in conflicts_to_show {
+            conflict_list = conflict_list.push(
+                text(format!("  • {}", trigger))
+                    .font(UI_FONT)
+                    .size(11)
+                    .color(COLOR_MUTED),
+            );
+        }
+
+        if import_state.conflicts.len() > 5 {
+            conflict_list = conflict_list.push(
+                text(format!(
+                    "  ... and {} more",
+                    import_state.conflicts.len() - 5
+                ))
+                .font(UI_FONT)
+                .size(11)
+                .color(COLOR_MUTED),
+            );
+        }
+
+        let conflicts_section = column![
+            text("Conflicting triggers:")
+                .font(UI_FONT)
+                .size(12)
+                .color(COLOR_TEXT),
+            conflict_list,
+        ]
+        .spacing(4);
+
+        // Question
+        let question = text("How would you like to proceed?")
+            .font(UI_FONT)
+            .size(12)
+            .color(COLOR_TEXT);
+
+        // Buttons
+        let overwrite_btn = button(
+            row![
+                text(ICON_REPLACE)
+                    .font(ICON_FONT)
+                    .size(14)
+                    .color(COLOR_WARNING),
+                text("Overwrite All")
+                    .font(UI_FONT)
+                    .size(13)
+                    .color(COLOR_TEXT)
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::ImportConflictDecision(
+            ImportDecision::OverwriteAll,
+        ))
+        .padding([8, 14])
+        .style(modern_button_style);
+
+        let skip_btn = button(
+            row![
+                text(ICON_SKIP)
+                    .font(ICON_FONT)
+                    .size(14)
+                    .color(COLOR_SUCCESS),
+                text("Skip Conflicts")
+                    .font(UI_FONT)
+                    .size(13)
+                    .color(COLOR_TEXT)
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::ImportConflictDecision(ImportDecision::SkipAll))
+        .padding([8, 14])
+        .style(modern_button_style);
+
+        let cancel_btn = button(
+            row![
+                text(ICON_CANCEL)
+                    .font(ICON_FONT)
+                    .size(14)
+                    .color(COLOR_MUTED),
+                text("Cancel").font(UI_FONT).size(13).color(COLOR_TEXT)
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::CloseImportDialog)
+        .padding([8, 14])
+        .style(subtle_button_style);
+
+        let button_row = row![overwrite_btn, skip_btn, cancel_btn]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+
+        // Main content
+        let content = column![
+            header,
+            Space::new().height(Length::Fixed(12.0)),
+            container(
+                column![
+                    summary,
+                    Space::new().height(Length::Fixed(12.0)),
+                    conflicts_section,
+                    Space::new().height(Length::Fixed(16.0)),
+                    question,
+                    Space::new().height(Length::Fixed(12.0)),
+                    button_row,
+                ]
+                .spacing(4)
+            )
+            .padding(16)
+            .width(Length::Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(iced::Background::Color(COLOR_CARD)),
+                border: iced::Border {
+                    color: COLOR_BORDER,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            }),
+        ]
+        .spacing(4)
+        .padding([0, 12]);
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(6)
+            .style(|_: &Theme| container::Style {
+                background: Some(iced::Background::Color(COLOR_BG)),
+                ..Default::default()
+            })
+            .into()
+    }
+
     // Load/Save settings helpers
     fn load_block_apps() -> Vec<String> {
         let path = Self::get_settings_path("block_apps.json");
@@ -1491,30 +1713,83 @@ impl PexandApp {
                 let conn = self.db_conn.lock().unwrap();
                 let manager = SnippetManager::new(&conn);
 
-                // Import each snippet
-                for snippet in imported_snippets {
-                    // Check if trigger already exists
+                // Check for conflicts
+                let mut conflicts = Vec::new();
+                let mut new_count = 0;
+
+                for snippet in &imported_snippets {
                     if manager.read(&snippet.trigger).ok().flatten().is_some() {
-                        // Update existing
-                        let _ = manager.update(&snippet);
+                        conflicts.push(snippet.trigger.clone());
                     } else {
-                        // Create new
-                        let _ = manager.create(&snippet);
+                        new_count += 1;
                     }
                 }
 
-                // Release the connection lock
                 drop(conn);
 
-                // Notify Sentinel to reload
-                if let Some(tx) = &self.sentinel_tx {
-                    let _ = tx.send(SentinelMessage::ReloadTrie);
+                // If there are conflicts, show dialog
+                if !conflicts.is_empty() {
+                    self.import_state = Some(ImportState {
+                        snippets: imported_snippets,
+                        conflicts: conflicts.clone(),
+                        new_count,
+                        conflict_count: conflicts.len(),
+                    });
+                    self.view_mode = ViewMode::ImportDialog;
+                } else {
+                    // No conflicts, import all
+                    self.perform_import(imported_snippets, false);
                 }
 
-                self.reload_snippets();
                 println!("Imported snippets from: {:?}", import_path);
             }
         }
+    }
+
+    fn process_import_decision(&mut self, decision: ImportDecision) {
+        if let Some(import_state) = self.import_state.take() {
+            match decision {
+                ImportDecision::OverwriteAll => {
+                    self.perform_import(import_state.snippets, true);
+                }
+                ImportDecision::SkipAll => {
+                    self.perform_import(import_state.snippets, false);
+                }
+                ImportDecision::Cancel => {
+                    // Just close the dialog
+                }
+            }
+        }
+        self.view_mode = ViewMode::Settings;
+    }
+
+    fn perform_import(&mut self, snippets: Vec<Snippet>, overwrite: bool) {
+        let conn = self.db_conn.lock().unwrap();
+        let manager = SnippetManager::new(&conn);
+
+        for snippet in snippets {
+            let exists = manager.read(&snippet.trigger).ok().flatten().is_some();
+
+            if exists && !overwrite {
+                // Skip this snippet
+                continue;
+            } else if exists && overwrite {
+                // Update existing
+                let _ = manager.update(&snippet);
+            } else {
+                // Create new
+                let _ = manager.create(&snippet);
+            }
+        }
+
+        drop(conn);
+
+        // Notify Sentinel to reload
+        if let Some(tx) = &self.sentinel_tx {
+            let _ = tx.send(SentinelMessage::ReloadTrie);
+        }
+
+        self.reload_snippets();
     }
 }
 

@@ -159,6 +159,11 @@ fn handle_key_press(
     db_conn: &Arc<Mutex<Connection>>,
     modifier_state: &Arc<Mutex<ModifierState>>,
 ) {
+    // Skip processing if current window is pexand itself
+    if is_current_app_blacklisted() {
+        return;
+    }
+
     // Check if this is a delimiter key (space, enter, tab, punctuation)
     let is_delimiter = matches!(
         key,
@@ -185,7 +190,9 @@ fn handle_key_press(
                 drop(buffer_guard);
 
                 let trie_guard = trie.lock().unwrap();
-                if let Some(trigger) = trie_guard.find_matching_trigger(&buffer_text) {
+                // Normalize to lowercase for case-insensitive matching
+                let buffer_text_lower = buffer_text.to_lowercase();
+                if let Some(trigger) = trie_guard.find_matching_trigger(&buffer_text_lower) {
                     drop(trie_guard);
                     perform_expansion(&trigger, buffer, injector, db_conn, true);
                 }
@@ -203,7 +210,9 @@ fn handle_key_press(
     // If this character is a delimiter, check for trigger match
     if is_delimiter {
         let trie_guard = trie.lock().unwrap();
-        if let Some(trigger) = trie_guard.find_matching_trigger(&buffer_text) {
+        // Normalize to lowercase for case-insensitive matching
+        let buffer_text_lower = buffer_text.to_lowercase();
+        if let Some(trigger) = trie_guard.find_matching_trigger(&buffer_text_lower) {
             drop(trie_guard);
             perform_expansion(&trigger, buffer, injector, db_conn, true);
         }
@@ -228,6 +237,10 @@ fn perform_expansion(
     let manager = SnippetManager::new(&conn);
 
     if let Ok(Some(snippet)) = manager.read(trigger) {
+        println!(
+            "[SENTINEL] Found snippet, body length: {}",
+            snippet.body.len()
+        );
         // Parse variables in the body
         let mut parser = VariableParser::new();
         let expanded_body = parser.parse(&snippet.body).unwrap_or(snippet.body.clone());
@@ -342,6 +355,11 @@ fn is_current_app_blacklisted() -> bool {
         Some(exe) => exe.to_lowercase(),
         None => return false, // If we can't get the window, allow expansion
     };
+
+    // Always block pexand itself to avoid capturing keystrokes in its own UI
+    if current_exe == "pexand.exe" {
+        return true;
+    }
 
     // Load blacklist from settings
     let blacklist = load_block_apps();
