@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Prashanth Krishnamurthy | techformist.com"]
 description = "A lightweight text expander for Windows"
+license = "MIT"
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
