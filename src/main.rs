@@ -8,24 +8,29 @@ use global_hotkey::{
 use pexand::db::{Bootstrapper, Database};
 use pexand::sentinel::Sentinel;
 use pexand::ui::{run_ui, SystemTray, UiExternalMessage};
+use std::sync::{Arc, Mutex};
 
 fn main() -> iced::Result {
-    // Initialize database
-    let db = match Database::init() {
-        Ok(db) => db,
-        Err(_e) => {
+    // Initialize database and get connection
+    let conn = match Database::init() {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("Failed to initialize database: {:?}", e);
             std::process::exit(1);
         }
     };
 
     // Bootstrap default snippets on first run
-    if let Err(e) = Bootstrapper::seed_defaults(db.connection()) {
+    if let Err(e) = Bootstrapper::seed_defaults(&conn) {
         eprintln!("Failed to seed defaults: {:?}", e);
         std::process::exit(1);
     }
 
-    // Create and start the Sentinel
-    let sentinel = match Sentinel::new() {
+    // Wrap connection in Arc<Mutex<>> for sharing across threads
+    let db_conn = Arc::new(Mutex::new(conn));
+
+    // Create and start the Sentinel with shared connection
+    let sentinel = match Sentinel::new(Arc::clone(&db_conn)) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to create Sentinel: {:?}", e);
@@ -70,6 +75,6 @@ fn main() -> iced::Result {
         });
     }
 
-    // Run the UI (starts minimized to tray)
-    run_ui(tx, ui_rx)
+    // Run the UI with shared connection (starts minimized to tray)
+    run_ui(db_conn, tx, ui_rx)
 }

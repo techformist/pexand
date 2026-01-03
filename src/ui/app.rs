@@ -13,7 +13,9 @@ use iced::{
     },
     window, Element, Length, Subscription, Task, Theme,
 };
+use rusqlite::Connection;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use super::constants::*;
 use super::editor::EditorState;
@@ -87,7 +89,7 @@ pub struct PexandApp {
     selected_index: usize,
     view_mode: ViewMode,
     editor_state: Option<EditorState>,
-    db_path: String,
+    db_conn: Arc<Mutex<Connection>>,
     sentinel_tx: Option<Sender<SentinelMessage>>,
     matcher: SkimMatcherV2,
     focused_field: FocusedField,
@@ -101,11 +103,11 @@ pub struct PexandApp {
 
 impl PexandApp {
     pub fn new(
+        db_conn: Arc<Mutex<Connection>>,
         sentinel_tx: Option<Sender<SentinelMessage>>,
         external_rx: crossbeam_channel::Receiver<UiExternalMessage>,
     ) -> Self {
-        let db_path = get_db_path();
-        let snippets = load_snippets(&db_path);
+        let snippets = load_snippets(&db_conn);
         let filtered_snippets = snippets
             .iter()
             .enumerate()
@@ -119,7 +121,7 @@ impl PexandApp {
             selected_index: 0,
             view_mode: ViewMode::List,
             editor_state: None,
-            db_path,
+            db_conn,
             sentinel_tx,
             matcher: SkimMatcherV2::default(),
             focused_field: FocusedField::Search,
@@ -132,7 +134,7 @@ impl PexandApp {
     }
 
     fn reload_snippets(&mut self) {
-        self.snippets = load_snippets(&self.db_path);
+        self.snippets = load_snippets(&self.db_conn);
         self.filter_snippets();
     }
 
@@ -202,11 +204,7 @@ impl PexandApp {
                 return;
             }
 
-            let conn = match rusqlite::Connection::open(&self.db_path) {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-
+            let conn = self.db_conn.lock().unwrap();
             let manager = SnippetManager::new(&conn);
 
             if let Some(original_index) = editor.editing_index {
@@ -237,6 +235,9 @@ impl PexandApp {
                 let _ = manager.create(&snippet);
             }
 
+            // Release the connection lock
+            drop(conn);
+
             // Notify Sentinel to reload
             if let Some(tx) = &self.sentinel_tx {
                 let _ = tx.send(SentinelMessage::ReloadTrie);
@@ -252,13 +253,10 @@ impl PexandApp {
     fn delete_snippet(&mut self, index: usize) {
         if let Some((original_index, _)) = self.filtered_snippets.get(index) {
             if let Some(snippet) = self.snippets.get(*original_index) {
-                let conn = match rusqlite::Connection::open(&self.db_path) {
-                    Ok(c) => c,
-                    Err(_) => return,
-                };
-
+                let conn = self.db_conn.lock().unwrap();
                 let manager = SnippetManager::new(&conn);
                 let _ = manager.delete(&snippet.trigger);
+                drop(conn);
 
                 // Notify Sentinel to reload
                 if let Some(tx) = &self.sentinel_tx {
@@ -312,12 +310,13 @@ impl PexandApp {
 impl PexandApp {
     fn init(
         flags: (
+            Arc<Mutex<Connection>>,
             Option<Sender<SentinelMessage>>,
             crossbeam_channel::Receiver<UiExternalMessage>,
         ),
     ) -> (Self, Task<Message>) {
-        let (sentinel_tx, external_rx) = flags;
-        let app = Self::new(sentinel_tx, external_rx);
+        let (db_conn, sentinel_tx, external_rx) = flags;
+        let app = Self::new(db_conn, sentinel_tx, external_rx);
         (app, Task::none())
     }
 
@@ -1438,11 +1437,7 @@ impl PexandApp {
         // Read and parse JSON
         if let Ok(content) = std::fs::read_to_string(&import_path) {
             if let Ok(imported_snippets) = serde_json::from_str::<Vec<Snippet>>(&content) {
-                let conn = match rusqlite::Connection::open(&self.db_path) {
-                    Ok(c) => c,
-                    Err(_) => return,
-                };
-
+                let conn = self.db_conn.lock().unwrap();
                 let manager = SnippetManager::new(&conn);
 
                 // Import each snippet
@@ -1456,6 +1451,9 @@ impl PexandApp {
                         let _ = manager.create(&snippet);
                     }
                 }
+
+                // Release the connection lock
+                drop(conn);
 
                 // Notify Sentinel to reload
                 if let Some(tx) = &self.sentinel_tx {
@@ -1489,44 +1487,27 @@ fn shortcut_row<'a>(key: &'a str, description: &'a str) -> Element<'a, Message> 
     .into()
 }
 
-fn get_db_path() -> String {
-    use std::path::{Path, PathBuf};
-
-    let portable_marker = Path::new("portable.txt");
-
-    if portable_marker.exists() {
-        "pexand.db".to_string()
-    } else {
-        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        let mut path = PathBuf::from(appdata);
-        path.push("Pexand");
-        path.push("pexand.db");
-        path.to_string_lossy().to_string()
-    }
-}
-
-fn load_snippets(db_path: &str) -> Vec<Snippet> {
-    match rusqlite::Connection::open(db_path) {
-        Ok(conn) => {
-            let manager = SnippetManager::new(&conn);
-            manager.list_all().unwrap_or_default()
-        }
-        Err(_) => Vec::new(),
-    }
+fn load_snippets(db_conn: &Arc<Mutex<Connection>>) -> Vec<Snippet> {
+    let conn = db_conn.lock().unwrap();
+    let manager = SnippetManager::new(&conn);
+    manager.list_all().unwrap_or_default()
 }
 
 pub fn run_ui(
+    db_conn: Arc<Mutex<Connection>>,
     sentinel_tx: Sender<SentinelMessage>,
     external_rx: crossbeam_channel::Receiver<UiExternalMessage>,
 ) -> iced::Result {
+    let db_conn = std::sync::Arc::new(std::sync::Mutex::new(Some(db_conn)));
     let sentinel_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(sentinel_tx)));
     let external_rx = std::sync::Arc::new(external_rx);
 
     iced::application(
         move || {
+            let db = db_conn.lock().unwrap().take().unwrap();
             let tx = sentinel_tx.lock().unwrap().take();
             let rx = external_rx.clone();
-            PexandApp::init((tx, (*rx).clone()))
+            PexandApp::init((db, tx, (*rx).clone()))
         },
         PexandApp::update,
         PexandApp::view,

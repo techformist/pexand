@@ -1,6 +1,7 @@
 use super::{Buffer, Injector, Trie, VariableParser};
-use crate::db::{Database, SnippetManager};
+use crate::db::SnippetManager;
 use rdev::{listen, Event, EventType, Key};
+use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -19,40 +20,37 @@ pub struct Sentinel {
     buffer: Arc<Mutex<Buffer>>,
     trie: Arc<Mutex<Trie>>,
     injector: Arc<Mutex<Injector>>,
-    db_path: String,
+    db_conn: Arc<Mutex<Connection>>,
 }
 
 impl Sentinel {
-    /// Create a new Sentinel
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create a new Sentinel with a shared database connection
+    pub fn new(db_conn: Arc<Mutex<Connection>>) -> Result<Self, Box<dyn std::error::Error>> {
         let buffer = Arc::new(Mutex::new(Buffer::new(50)));
         let trie = Arc::new(Mutex::new(Trie::new()));
         let injector = Arc::new(Mutex::new(Injector::new()));
 
-        // Get database path
-        let db = Database::init()?;
-        let db_path = get_db_path();
-
         // Load triggers into Trie
-        let conn = db.connection();
-        let manager = SnippetManager::new(conn);
-        let triggers = manager.get_all_triggers()?;
+        {
+            let conn = db_conn.lock().unwrap();
+            let manager = SnippetManager::new(&conn);
+            let triggers = manager.get_all_triggers()?;
 
-        let mut trie_guard = trie.lock().unwrap();
-        trie_guard.load_triggers(&triggers);
-        drop(trie_guard);
+            let mut trie_guard = trie.lock().unwrap();
+            trie_guard.load_triggers(&triggers);
+        }
 
         Ok(Self {
             buffer,
             trie,
             injector,
-            db_path,
+            db_conn,
         })
     }
 
     /// Reload triggers from the database
     pub fn reload_trie(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(&self.db_path)?;
+        let conn = self.db_conn.lock().unwrap();
         let manager = SnippetManager::new(&conn);
         let triggers = manager.get_all_triggers()?;
 
@@ -79,13 +77,13 @@ impl Sentinel {
         let buffer = Arc::clone(&self.buffer);
         let trie = Arc::clone(&self.trie);
         let injector = Arc::clone(&self.injector);
-        let db_path = self.db_path.clone();
+        let db_conn = Arc::clone(&self.db_conn);
 
         // Spawn keyboard listener thread
         let buffer_clone = Arc::clone(&buffer);
         let trie_clone = Arc::clone(&trie);
         let injector_clone = Arc::clone(&injector);
-        let db_path_clone = db_path.clone();
+        let db_conn_clone = Arc::clone(&db_conn);
 
         thread::spawn(move || {
             let callback = move |event: Event| {
@@ -95,7 +93,7 @@ impl Sentinel {
                         &buffer_clone,
                         &trie_clone,
                         &injector_clone,
-                        &db_path_clone,
+                        &db_conn_clone,
                     );
                 }
             };
@@ -131,7 +129,7 @@ fn handle_key_press(
     buffer: &Arc<Mutex<Buffer>>,
     trie: &Arc<Mutex<Trie>>,
     injector: &Arc<Mutex<Injector>>,
-    db_path: &str,
+    db_conn: &Arc<Mutex<Connection>>,
 ) {
     // Check if this is a delimiter key (space, enter, tab, punctuation)
     let is_delimiter = matches!(
@@ -160,7 +158,7 @@ fn handle_key_press(
                 let trie_guard = trie.lock().unwrap();
                 if let Some(trigger) = trie_guard.find_matching_trigger(&buffer_text) {
                     drop(trie_guard);
-                    perform_expansion(&trigger, buffer, injector, db_path, true);
+                    perform_expansion(&trigger, buffer, injector, db_conn, true);
                 }
             }
             return;
@@ -178,7 +176,7 @@ fn handle_key_press(
         let trie_guard = trie.lock().unwrap();
         if let Some(trigger) = trie_guard.find_matching_trigger(&buffer_text) {
             drop(trie_guard);
-            perform_expansion(&trigger, buffer, injector, db_path, true);
+            perform_expansion(&trigger, buffer, injector, db_conn, true);
         }
     }
 }
@@ -188,7 +186,7 @@ fn perform_expansion(
     trigger: &str,
     buffer: &Arc<Mutex<Buffer>>,
     injector: &Arc<Mutex<Injector>>,
-    db_path: &str,
+    db_conn: &Arc<Mutex<Connection>>,
     include_delimiter: bool,
 ) {
     // Check if current app is blacklisted
@@ -196,37 +194,42 @@ fn perform_expansion(
         return; // Don't expand in blacklisted apps
     }
 
-    // Get expansion from database
-    if let Ok(conn) = rusqlite::Connection::open(db_path) {
+    // Get expansion from database using shared connection
+    let conn = db_conn.lock().unwrap();
+    let manager = SnippetManager::new(&conn);
+
+    if let Ok(Some(snippet)) = manager.read(trigger) {
+        // Parse variables in the body
+        let mut parser = VariableParser::new();
+        let expanded_body = parser.parse(&snippet.body).unwrap_or(snippet.body.clone());
+
+        // Release the lock before performing IO operations
+        drop(conn);
+
+        // Wait a moment to ensure all characters are on screen
+        thread::sleep(std::time::Duration::from_millis(50));
+
+        // Perform expansion
+        let mut injector_guard = injector.lock().unwrap();
+        // Delete the trigger + delimiter (if present)
+        let delete_count = if include_delimiter {
+            trigger.len() + 1
+        } else {
+            trigger.len()
+        };
+        injector_guard.delete_trigger(delete_count);
+        injector_guard.type_text(&expanded_body);
+        drop(injector_guard);
+
+        // Increment usage count (reacquire lock)
+        let conn = db_conn.lock().unwrap();
         let manager = SnippetManager::new(&conn);
+        let _ = manager.increment_usage(trigger);
+        drop(conn);
 
-        if let Ok(Some(snippet)) = manager.read(trigger) {
-            // Parse variables in the body
-            let mut parser = VariableParser::new();
-            let expanded_body = parser.parse(&snippet.body).unwrap_or(snippet.body.clone());
-
-            // Wait a moment to ensure all characters are on screen
-            thread::sleep(std::time::Duration::from_millis(50));
-
-            // Perform expansion
-            let mut injector_guard = injector.lock().unwrap();
-            // Delete the trigger + delimiter (if present)
-            let delete_count = if include_delimiter {
-                trigger.len() + 1
-            } else {
-                trigger.len()
-            };
-            injector_guard.delete_trigger(delete_count);
-            injector_guard.type_text(&expanded_body);
-            drop(injector_guard);
-
-            // Increment usage count
-            let _ = manager.increment_usage(trigger);
-
-            // Clear buffer after expansion
-            let mut buffer_guard = buffer.lock().unwrap();
-            buffer_guard.clear();
-        }
+        // Clear buffer after expansion
+        let mut buffer_guard = buffer.lock().unwrap();
+        buffer_guard.clear();
     }
 }
 
@@ -282,24 +285,6 @@ fn key_to_char(key: Key) -> Option<char> {
         Key::RightBracket => Some(']'),
         Key::Quote => Some('\''),
         _ => None,
-    }
-}
-
-/// Get the database path (same logic as in Database)
-fn get_db_path() -> String {
-    use std::path::{Path, PathBuf};
-
-    let portable_marker = Path::new("portable.txt");
-
-    if portable_marker.exists() {
-        "pexand.db".to_string()
-    } else {
-        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-
-        let mut path = PathBuf::from(appdata);
-        path.push("Pexand");
-        path.push("pexand.db");
-        path.to_string_lossy().to_string()
     }
 }
 
@@ -415,11 +400,5 @@ mod tests {
         assert_eq!(key_to_char(Key::Space), Some(' '));
         assert_eq!(key_to_char(Key::SemiColon), Some(';'));
         assert_eq!(key_to_char(Key::Escape), None);
-    }
-
-    #[test]
-    fn test_get_db_path() {
-        let path = get_db_path();
-        assert!(!path.is_empty());
     }
 }
