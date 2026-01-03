@@ -52,11 +52,8 @@ pub enum Message {
     CloseSettings,
     OpenLink(String),
     // Settings messages
-    AddTriggerApp(String),
-    RemoveTriggerApp(usize),
     AddBlockApp(String),
     RemoveBlockApp(usize),
-    TriggerAppInputChanged(String),
     BlockAppInputChanged(String),
     ExportSnippets,
     ImportSnippets,
@@ -80,7 +77,6 @@ enum FocusedField {
     EditorTrigger,
     EditorLabel,
     EditorBody,
-    SettingsTriggerApp,
     SettingsBlockApp,
 }
 
@@ -99,9 +95,7 @@ pub struct PexandApp {
     window_minimized: bool,
     window_id: Option<window::Id>,
     // Settings state
-    trigger_apps: Vec<String>,
     block_apps: Vec<String>,
-    trigger_app_input: String,
     block_app_input: String,
 }
 
@@ -132,9 +126,7 @@ impl PexandApp {
             external_rx,
             window_minimized: true,
             window_id: None,
-            trigger_apps: Self::load_trigger_apps(),
             block_apps: Self::load_block_apps(),
-            trigger_app_input: String::new(),
             block_app_input: String::new(),
         }
     }
@@ -309,17 +301,10 @@ impl PexandApp {
                 _ => Task::none(),
             },
             ViewMode::Help => Task::none(),
-            ViewMode::Settings => match self.focused_field {
-                FocusedField::SettingsTriggerApp => {
-                    self.focused_field = FocusedField::SettingsBlockApp;
-                    operation::focus(iced::widget::Id::from(SETTINGS_BLOCK_APP_INPUT_ID))
-                }
-                FocusedField::SettingsBlockApp => {
-                    self.focused_field = FocusedField::SettingsTriggerApp;
-                    operation::focus(iced::widget::Id::from(SETTINGS_TRIGGER_APP_INPUT_ID))
-                }
-                _ => Task::none(),
-            },
+            ViewMode::Settings => {
+                // Only one field in settings now, so tab does nothing
+                Task::none()
+            }
         }
     }
 }
@@ -513,8 +498,8 @@ impl PexandApp {
             }
             Message::ShowSettings => {
                 self.view_mode = ViewMode::Settings;
-                self.focused_field = FocusedField::SettingsTriggerApp;
-                return operation::focus(iced::widget::Id::from(SETTINGS_TRIGGER_APP_INPUT_ID));
+                self.focused_field = FocusedField::SettingsBlockApp;
+                return operation::focus(iced::widget::Id::from(SETTINGS_BLOCK_APP_INPUT_ID));
             }
             Message::CloseSettings => {
                 self.view_mode = ViewMode::List;
@@ -553,24 +538,8 @@ impl PexandApp {
                 eprintln!("[DEBUG] Window opened with id: {:?}", id);
                 self.window_id = Some(id);
             }
-            Message::TriggerAppInputChanged(input) => {
-                self.trigger_app_input = input;
-            }
             Message::BlockAppInputChanged(input) => {
                 self.block_app_input = input;
-            }
-            Message::AddTriggerApp(app_name) => {
-                if !app_name.trim().is_empty() && !self.trigger_apps.contains(&app_name) {
-                    self.trigger_apps.push(app_name);
-                    Self::save_trigger_apps(&self.trigger_apps);
-                    self.trigger_app_input.clear();
-                }
-            }
-            Message::RemoveTriggerApp(index) => {
-                if index < self.trigger_apps.len() {
-                    self.trigger_apps.remove(index);
-                    Self::save_trigger_apps(&self.trigger_apps);
-                }
             }
             Message::AddBlockApp(app_name) => {
                 if !app_name.trim().is_empty() && !self.block_apps.contains(&app_name) {
@@ -1193,77 +1162,19 @@ impl PexandApp {
         .align_y(iced::Alignment::Center);
 
         // Application Filtering Section Header
-        let filtering_header = text("Application Filtering")
+        let filtering_header = text("Application Blacklist")
             .font(UI_FONT)
             .size(14)
             .color(COLOR_TEXT);
 
-        let filtering_desc = text("Control which applications trigger text expansion. If \"Only in these apps\" is empty, expansion works everywhere except blocked apps.")
+        let filtering_desc = text("Text expansion works in all applications by default. Add applications below where you want to DISABLE expansion (e.g., terminals, IDEs, password managers).")
             .font(UI_FONT)
             .size(11)
             .color(COLOR_MUTED)
             .line_height(1.4);
 
-        // Trigger Apps (Whitelist)
-        let trigger_apps_title = text("Only in these apps (whitelist)")
-            .font(UI_FONT)
-            .size(12)
-            .color(COLOR_MUTED);
-
-        let trigger_input = text_input("e.g., notepad.exe, chrome.exe", &self.trigger_app_input)
-            .on_input(Message::TriggerAppInputChanged)
-            .on_submit(Message::AddTriggerApp(self.trigger_app_input.clone()))
-            .padding([10, 12])
-            .font(UI_FONT)
-            .size(14)
-            .id(SETTINGS_TRIGGER_APP_INPUT_ID);
-
-        let add_trigger_btn = button(text(ICON_ADD).font(ICON_FONT).size(12).color(COLOR_ACCENT))
-            .on_press(Message::AddTriggerApp(self.trigger_app_input.clone()))
-            .padding(8)
-            .style(modern_button_style);
-
-        let trigger_input_row = row![trigger_input, add_trigger_btn]
-            .spacing(8)
-            .align_y(iced::Alignment::Center);
-
-        let mut trigger_apps_list = Column::new().spacing(4);
-        for (idx, app) in self.trigger_apps.iter().enumerate() {
-            let app_row = row![
-                text(app).font(UI_FONT).size(11).color(COLOR_TEXT),
-                Space::new().width(Length::Fill),
-                button(
-                    text(ICON_DELETE)
-                        .font(ICON_FONT)
-                        .size(11)
-                        .color(COLOR_MUTED)
-                )
-                .on_press(Message::RemoveTriggerApp(idx))
-                .padding(4)
-                .style(subtle_button_style)
-            ]
-            .spacing(8)
-            .padding(6)
-            .align_y(iced::Alignment::Center);
-
-            let app_container =
-                container(app_row)
-                    .width(Length::Fill)
-                    .style(|_: &Theme| container::Style {
-                        background: Some(iced::Background::Color(COLOR_PANEL)),
-                        border: iced::Border {
-                            color: COLOR_BORDER,
-                            width: 1.0,
-                            radius: 6.0.into(),
-                        },
-                        ..Default::default()
-                    });
-
-            trigger_apps_list = trigger_apps_list.push(app_container);
-        }
-
         // Block Apps (Blacklist)
-        let block_apps_title = text("Never in these apps (blacklist)")
+        let block_apps_title = text("Blocked Applications")
             .font(UI_FONT)
             .size(12)
             .color(COLOR_MUTED);
@@ -1326,12 +1237,6 @@ impl PexandApp {
                 filtering_header,
                 Space::new().height(Length::Fixed(8.0)),
                 filtering_desc,
-                Space::new().height(Length::Fixed(16.0)),
-                trigger_apps_title,
-                Space::new().height(Length::Fixed(6.0)),
-                trigger_input_row,
-                Space::new().height(Length::Fixed(8.0)),
-                trigger_apps_list,
                 Space::new().height(Length::Fixed(16.0)),
                 block_apps_title,
                 Space::new().height(Length::Fixed(6.0)),
@@ -1456,22 +1361,6 @@ impl PexandApp {
     }
 
     // Load/Save settings helpers
-    fn load_trigger_apps() -> Vec<String> {
-        let path = Self::get_settings_path("trigger_apps.json");
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn save_trigger_apps(apps: &[String]) {
-        let path = Self::get_settings_path("trigger_apps.json");
-        if let Ok(content) = serde_json::to_string_pretty(apps) {
-            let _ = std::fs::write(&path, content);
-        }
-    }
-
     fn load_block_apps() -> Vec<String> {
         let path = Self::get_settings_path("block_apps.json");
         if let Ok(content) = std::fs::read_to_string(&path) {

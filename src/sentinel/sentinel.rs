@@ -1,6 +1,7 @@
 use super::{Buffer, Injector, Trie, VariableParser};
 use crate::db::{Database, SnippetManager};
 use rdev::{listen, Event, EventType, Key};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -190,6 +191,11 @@ fn perform_expansion(
     db_path: &str,
     include_delimiter: bool,
 ) {
+    // Check if current app is blacklisted
+    if is_current_app_blacklisted() {
+        return; // Don't expand in blacklisted apps
+    }
+
     // Get expansion from database
     if let Ok(conn) = rusqlite::Connection::open(db_path) {
         let manager = SnippetManager::new(&conn);
@@ -295,6 +301,108 @@ fn get_db_path() -> String {
         path.push("pexand.db");
         path.to_string_lossy().to_string()
     }
+}
+
+/// Check if the current foreground application is blacklisted
+fn is_current_app_blacklisted() -> bool {
+    // Get the foreground window's executable name
+    let current_exe = match get_foreground_window_exe() {
+        Some(exe) => exe.to_lowercase(),
+        None => return false, // If we can't get the window, allow expansion
+    };
+
+    // Load blacklist from settings
+    let blacklist = load_block_apps();
+
+    // Check if current exe is in the blacklist (case-insensitive)
+    blacklist
+        .iter()
+        .any(|blocked| blocked.to_lowercase() == current_exe)
+}
+
+/// Load blacklisted apps from settings
+fn load_block_apps() -> Vec<String> {
+    let path = get_settings_path("block_apps.json");
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Get settings file path
+fn get_settings_path(filename: &str) -> PathBuf {
+    use std::path::PathBuf;
+
+    let portable_marker = Path::new("portable.txt");
+
+    if portable_marker.exists() {
+        PathBuf::from(filename)
+    } else {
+        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        let mut path = PathBuf::from(appdata);
+        path.push("Pexand");
+        path.push(filename);
+        path
+    }
+}
+
+/// Get the executable name of the foreground window (Windows-specific)
+#[cfg(target_os = "windows")]
+fn get_foreground_window_exe() -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+
+    unsafe {
+        // Get the foreground window
+        let hwnd: HWND = GetForegroundWindow();
+        if hwnd.0 == 0 {
+            return None;
+        }
+
+        // Get the process ID
+        let mut process_id: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+
+        if process_id == 0 {
+            return None;
+        }
+
+        // Open the process
+        let process_handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)
+        {
+            Ok(handle) => handle,
+            Err(_) => return None,
+        };
+
+        // Get the executable path
+        let mut buffer: [u16; 260] = [0; 260];
+        let mut size: u32 = buffer.len() as u32;
+        let pwstr = PWSTR(buffer.as_mut_ptr());
+
+        match QueryFullProcessImageNameW(process_handle, PROCESS_NAME_WIN32, pwstr, &mut size) {
+            Ok(_) => {
+                let path = String::from_utf16_lossy(&buffer[..size as usize]);
+                // Extract just the filename from the full path
+                std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_foreground_window_exe() -> Option<String> {
+    // Not implemented for non-Windows platforms
+    None
 }
 
 #[cfg(test)]

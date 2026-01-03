@@ -18,7 +18,6 @@ Pexand is a lightweight, fast, and intelligent text expander for Windows that au
 
 🎭 **Advanced Features**
 
-- 📅 Dynamic variables: `{{date}}`, `{{clipboard}}`, `{{cursor}}`
 - 🔄 Recursion prevention for safe expansions
 - 📊 Usage tracking and statistics
 - 🎯 Radix Trie for O(m) pattern matching
@@ -95,7 +94,6 @@ Pexand supports dynamic variables that are evaluated at expansion time:
 - `{{date:%Y-%m-%d}}` - Custom date format (strftime)
 - `{{date:%B %d, %Y}}` - Example: "January 02, 2026"
 - `{{clipboard}}` - Current clipboard content
-- `{{cursor}}` - Cursor position (placeholder for future)
 
 **Example:**
 

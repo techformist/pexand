@@ -6,7 +6,6 @@ use iced::Font;
 pub const SEARCH_INPUT_ID: &str = "search_input";
 pub const TRIGGER_INPUT_ID: &str = "trigger_input";
 pub const LABEL_INPUT_ID: &str = "label_input";
-pub const SETTINGS_TRIGGER_APP_INPUT_ID: &str = "settings_trigger_app_input";
 pub const SETTINGS_BLOCK_APP_INPUT_ID: &str = "settings_block_app_input";
 
 // Fonts

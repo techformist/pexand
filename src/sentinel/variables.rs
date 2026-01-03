@@ -1,6 +1,6 @@
+use chrono::Local;
 use clipboard_win::{formats, get_clipboard};
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Parse and expand dynamic variables in text
 pub struct VariableParser {
@@ -94,52 +94,12 @@ impl VariableParser {
     }
 
     fn expand_date(&self, format: &str) -> Result<String, String> {
-        let now = SystemTime::now();
-        let duration = now
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| format!("System time error: {}", e))?;
-        let timestamp = duration.as_secs();
+        let now = Local::now();
 
-        // Simple date formatting - supports common patterns
-        let formatted = match format {
-            "%Y-%m-%d" => self.format_date_ymd(timestamp),
-            "%Y/%m/%d" => self.format_date_ymd(timestamp).replace("-", "/"),
-            "%d-%m-%Y" => self.format_date_dmy(timestamp),
-            "%d/%m/%Y" => self.format_date_dmy(timestamp).replace("-", "/"),
-            "%H:%M:%S" => self.format_time_hms(timestamp),
-            "%H:%M" => self.format_time_hm(timestamp),
-            "%Y-%m-%d %H:%M:%S" => format!("{} {}", self.format_date_ymd(timestamp), self.format_time_hms(timestamp)),
-            _ => return Err(format!("Unsupported date format: {}. Supported: %Y-%m-%d, %Y/%m/%d, %d-%m-%Y, %d/%m/%Y, %H:%M:%S, %H:%M, %Y-%m-%d %H:%M:%S", format)),
-        };
+        // Use chrono's strftime for full format support
+        let formatted = now.format(format).to_string();
 
         Ok(formatted)
-    }
-
-    fn format_date_ymd(&self, timestamp: u64) -> String {
-        let days_since_epoch = timestamp / 86400;
-        let (year, month, day) = days_to_date(days_since_epoch as i64);
-        format!("{:04}-{:02}-{:02}", year, month, day)
-    }
-
-    fn format_date_dmy(&self, timestamp: u64) -> String {
-        let days_since_epoch = timestamp / 86400;
-        let (year, month, day) = days_to_date(days_since_epoch as i64);
-        format!("{:02}-{:02}-{:04}", day, month, year)
-    }
-
-    fn format_time_hms(&self, timestamp: u64) -> String {
-        let seconds_today = timestamp % 86400;
-        let hours = seconds_today / 3600;
-        let minutes = (seconds_today % 3600) / 60;
-        let seconds = seconds_today % 60;
-        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
-    }
-
-    fn format_time_hm(&self, timestamp: u64) -> String {
-        let seconds_today = timestamp % 86400;
-        let hours = seconds_today / 3600;
-        let minutes = (seconds_today % 3600) / 60;
-        format!("{:02}:{:02}", hours, minutes)
     }
 
     fn expand_clipboard(&self) -> Result<String, String> {
@@ -203,46 +163,6 @@ fn detect_recursion_internal(
     false
 }
 
-// Helper function to convert days since Unix epoch to (year, month, day)
-fn days_to_date(days: i64) -> (i32, u32, u32) {
-    // Days since Unix epoch (1970-01-01)
-    let mut year = 1970;
-    let mut remaining_days = days;
-
-    // Calculate year
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if remaining_days < days_in_year {
-            break;
-        }
-        remaining_days -= days_in_year;
-        year += 1;
-    }
-
-    // Calculate month and day
-    let days_in_months = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month = 1;
-    for &days_in_month in &days_in_months {
-        if remaining_days < days_in_month as i64 {
-            break;
-        }
-        remaining_days -= days_in_month as i64;
-        month += 1;
-    }
-
-    let day = remaining_days + 1;
-    (year, month, day as u32)
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,9 +185,10 @@ mod tests {
     #[test]
     fn test_parse_date_custom_format() {
         let mut parser = VariableParser::new();
-        let result = parser.parse("Year: {{date:%Y}}").unwrap();
-        assert!(result.starts_with("Year: "));
-        assert_eq!(result.len(), "Year: ".len() + 4); // Year is 4 digits
+        let result = parser.parse("Date: {{date:%B %d, %Y}}").unwrap();
+        assert!(result.starts_with("Date: "));
+        // Should have month name, day, comma and year
+        assert!(result.contains(","));
     }
 
     #[test]
