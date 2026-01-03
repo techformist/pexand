@@ -154,7 +154,7 @@ Pexand uses a multi-threaded architecture:
 - **Memory Usage**: < 15MB idle
 - **Expansion Latency**: < 5ms
 - **CPU Usage**: < 1% idle
-- **Binary Size**: ~4-8MB (optimized release)
+- **Binary Size**: ~3-6MB (optimized release)
 - **Startup Time**: < 500ms
 
 ## Safety Features
@@ -180,12 +180,16 @@ Invalid examples that are prevented:
 ### Stack
 
 - **Language**: Rust 🦀
-- **GUI**: Iced v0.12
+- **GUI**: Iced v0.14
 - **Database**: SQLite (rusqlite v0.32)
 - **Keyboard**: rdev v0.5 + enigo v0.2
 - **Search**: fuzzy-matcher v0.3
 
 ### Why Rust?
+
+I had to start learning Rust somewhere, and AI coding is awesome.
+
+Also -
 
 - Memory safety without garbage collection
 - Zero-cost abstractions
@@ -261,7 +265,12 @@ pexand/
 │   │   ├── sentinel.rs   # Main coordinator
 │   │   └── variables.rs  # Variable parser
 │   └── ui/               # User interface
-│       └── app.rs        # Iced application
+│       ├── app.rs        # Main application logic
+│       ├── constants.rs  # UI constants and theme
+│       ├── editor.rs     # Editor state management
+│       ├── icons.rs      # Icon loading utilities
+│       ├── styles.rs     # Custom button styles
+│       └── tray.rs       # System tray integration
 ├── tests/                # Integration tests
 ├── Cargo.toml            # Dependencies
 └── README.md             # This file
@@ -279,55 +288,24 @@ A: Yes, just copy the `pexand.db` file. It's a standard SQLite database.
 A: All data is stored locally in SQLite. Nothing is sent to the internet.
 
 **Q: Can I export/import snippets?**  
-A: Not yet, but you can directly access the SQLite database with any SQLite tool.
+A: Yes! Use the Settings menu (⚙️) to export snippets to JSON or import from a backup file.
 
 **Q: Does it work on Mac/Linux?**  
-A: Currently Windows only. The core logic is cross-platform, but keyboard hooks are OS-specific.
+A: Currently Windows only. The core logic is cross-platform, but I don't have the means to test on other operating systems.
 
 **Q: How many snippets can I have?**  
 A: Thousands! The Trie structure scales efficiently.
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are not being accepted at this time since -
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with tests
-4. Submit a pull request
+1. This is a simple enough app
+2. I don't know what I am doing
+
+Pexand was built for my own use.
+If you do find an issue, pl. do log an issue and I will check it out.
 
 ## License
 
 MIT License - See LICENSE file for details
-
-## Credits
-
-Developed by the Pexand Team  
-Built with ❤️ and Rust 🦀
-
-## Support
-
-- 🐛 **Issues**: GitHub Issues
-- 💬 **Discussions**: GitHub Discussions
-- 📧 **Email**: support@pexand.dev (if you set this up)
-
-## Changelog
-
-### v2.0.0 (2026-01-02)
-
-- ✨ Complete rewrite in Rust
-- 🎨 New Iced-based UI
-- 💾 SQLite database backend
-- 🚀 10x faster expansions
-- 📅 Dynamic variables support
-- 🔍 Fuzzy search
-- 🔒 Recursion prevention
-- 📊 Usage tracking
-
-### v1.0.0
-
-- Initial release (if you had one)
-
----
-
-**Made with 🦀 Rust** | **Powered by ⚡ Iced** | **Data stored in 💾 SQLite**
